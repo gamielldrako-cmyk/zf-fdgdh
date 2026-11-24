@@ -1,0 +1,64 @@
+name: Compress PDF to 110KB
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_kb:
+        description: "Final size in KB"
+        default: "110"
+
+permissions:
+  contents: write
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ghostscript
+
+      - name: Compress
+        env:
+          T: ${{ github.event.inputs.target_kb }}
+        run: |
+          mkdir -p compressed
+          max=$(( T * 1024 ))
+          for f in *.pdf; do
+            [ -f "$f" ] || continue
+            best="$f"; bs=$(stat -c%s "$f")
+            # DPI | JPEG QFactor (bada = chhoti file) | gray?
+            for lv in "120 0.9 0" "100 1.3 0" "90 1.8 0" "80 2.4 1" "70 3 1" "60 3.6 1" "50 4 1" "40 4 1"; do
+              set -- $lv
+              c=/DeviceRGB; [ "$3" = 1 ] && c=/DeviceGray
+              gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.5 -dPDFSETTINGS=/screen \
+                -sColorConversionStrategy=$( [ "$3" = 1 ] && echo Gray || echo LeaveColorUnchanged ) \
+                -dProcessColorModel=$c \
+                -dDownsampleColorImages=true -dDownsampleGrayImages=true -dDownsampleMonoImages=true \
+                -dColorImageResolution=$1 -dGrayImageResolution=$1 -dMonoImageResolution=$(( $1 * 2 )) \
+                -dAutoFilterColorImages=false -dAutoFilterGrayImages=false \
+                -dColorImageFilter=/DCTEncode -dGrayImageFilter=/DCTEncode \
+                -dDetectDuplicateImages=true -dCompressFonts=true -dSubsetFonts=true \
+                -dNOPAUSE -dQUIET -dBATCH -sOutputFile=tmp.pdf \
+                -c "<< /ColorImageDict << /QFactor $2 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> /GrayImageDict << /QFactor $2 /Blend 1 /HSamples [2 1 1 2] /VSamples [2 1 1 2] >> >> setdistillerparams" \
+                -f "$f" || continue
+              s=$(stat -c%s tmp.pdf)
+              echo "$f | ${1}dpi q$2 gray=$3 -> $((s/1024)) KB"
+              [ "$s" -lt "$bs" ] && { cp tmp.pdf best.pdf; best=best.pdf; bs=$s; }
+              [ "$bs" -le "$max" ] && break
+            done
+            cp "$best" "compressed/${f%.pdf}-compressed.pdf"
+            echo "RESULT $f -> $((bs/1024)) KB"
+          done
+          rm -f tmp.pdf best.pdf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compressed-pdfs
+          path: compressed/
+
+      - run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add compressed/
+          git commit -m "Add compressed PDFs" || echo "Nothing to commit"
+          git push
